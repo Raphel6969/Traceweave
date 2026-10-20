@@ -52,7 +52,7 @@ API URL explicitly configured:
 
 ```sh
 cd web
-NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
+NEXT_PUBLIC_API_URL=http://127.0.0.1:8000 npm run dev
 ```
 
 The API allows the local frontend origins `http://localhost:3000` and
@@ -71,7 +71,7 @@ Start the web application in another terminal:
 ```sh
 cd web
 npm install
-NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
+NEXT_PUBLIC_API_URL=http://127.0.0.1:8000 npm run dev
 ```
 
 Then open `http://localhost:3000`. The UI never invents a case when the API is

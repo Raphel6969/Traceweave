@@ -11,7 +11,7 @@ the fallback in its status line.
 ```bash
 cd web
 npm install
-NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
+NEXT_PUBLIC_API_URL=http://127.0.0.1:8000 npm run dev
 ```
 
 For a fresh offline-friendly local setup, run `./setup.sh` (or

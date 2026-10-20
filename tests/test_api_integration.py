@@ -172,3 +172,12 @@ def test_frontend_has_no_fabricated_case_payload(tmp_path: Path) -> None:
     assert 'view === "upload"' in source
     assert "Paste raw evidence" in source
     assert "occurred_at" in source
+
+
+def test_generated_demo_runtime_assets_and_local_url_are_packaged() -> None:
+    dockerfile = (Path(__file__).parents[1] / "Dockerfile.api").read_text(encoding="utf-8")
+    start_sh = (Path(__file__).parents[1] / "start.sh").read_text(encoding="utf-8")
+    env_example = (Path(__file__).parents[1] / ".env.example").read_text(encoding="utf-8")
+    assert "COPY datasets ./datasets" in dockerfile
+    assert "NEXT_PUBLIC_API_URL=http://127.0.0.1:8000" in env_example
+    assert "NEXT_PUBLIC_API_URL=http://127.0.0.1:8000" in start_sh
