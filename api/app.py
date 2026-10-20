@@ -1,11 +1,11 @@
 """TraceWeave local API. SQLite is the sole persistence layer."""
 from __future__ import annotations
-import hashlib, json, os, re, sqlite3
+import hashlib, json, os, re, sqlite3, io
 from pathlib import Path
 from typing import Any
 from fastapi import FastAPI, File, HTTPException, UploadFile, Header, Form, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, Response, PlainTextResponse
 from traceweave.engine import canonical_json, html_report, parse_auth_jsonl, parse_application_audit, parse_network_csv, analyze
 
 _SAFE=re.compile(r"[^A-Za-z0-9_.-]+")
@@ -50,7 +50,8 @@ def create_app(data_dir=None):
     try: db.execute('ALTER TABLE cases ADD COLUMN analysis TEXT')
     except sqlite3.OperationalError: pass
     db.commit()
-    app=FastAPI(title='TraceWeave API',version='0.3.0'); app.state.data_dir=root; app.state.db=db
+    app=FastAPI(title='TraceWeave API',version='0.4.0'); app.state.data_dir=root; app.state.db=db
+    app.state.telemetry={'requests':0,'uploads':0,'reports':0,'deletes':0,'demo_loads':0}
     app.add_middleware(CORSMiddleware,allow_origins=[x.strip() for x in os.environ.get('TRACEWEAVE_CORS_ORIGINS','http://localhost:3000,http://127.0.0.1:3000').split(',') if x.strip()],allow_credentials=False,allow_methods=['*'],allow_headers=['*'])
     def load(cid):
         if not re.fullmatch(r'[0-9a-f]{64}',cid): raise HTTPException(404,'case not found')
@@ -75,18 +76,59 @@ def create_app(data_dir=None):
             if r['previous_hash']!=prev or r['chain_hash']!=expected: return False
             prev=r['chain_hash']
         return True
+    @app.middleware('http')
+    async def telemetry_middleware(request, call_next):
+        app.state.telemetry['requests'] += 1
+        response = await call_next(request)
+        response.headers['X-TraceWeave-Version'] = app.version
+        return response
     @app.get('/health')
-    def health(): return {'status':'ok'}
+    def health():
+        return {'status':'ok','version':app.version,'storage':'sqlite','data_dir':str(root),
+                'database':str(root/'traceweave.sqlite3'),'auth_required':bool(os.environ.get('TRACEWEAVE_API_KEY')),
+                'case_count':db.execute('SELECT COUNT(*) FROM cases').fetchone()[0]}
+    @app.get('/diagnostics')
+    def diagnostics(_:None=Depends(_auth)):
+        return {'status':'ok','version':app.version,'sqlite':True,'foreign_keys':bool(db.execute('PRAGMA foreign_keys').fetchone()[0]),
+                'case_count':db.execute('SELECT COUNT(*) FROM cases').fetchone()[0], 'telemetry':dict(app.state.telemetry)}
+    @app.get('/telemetry')
+    def telemetry(_:None=Depends(_auth)): return {'version':app.version,**dict(app.state.telemetry)}
+
+    @app.get('/demo-cases')
+    def demo_cases(_:None=Depends(_auth)):
+        """Catalog bundled deterministic datasets; no analysis/results are embedded."""
+        dataset_root=Path(__file__).resolve().parents[1]/'datasets'; out=[{'id':'generated','title':'Generated attack scenario',
+            'description':'Deterministic offline credential-compromise-to-exfiltration scenario','files':['auth.jsonl','application.audit','network.csv'],
+            'ground_truth':None,'options':{'clock_skew':0,'drop_source_window':False,'identity_conflict':False,'benign_noise':True},
+            'scenario':'credential-compromise-to-exfiltration'}]
+        bundled=sorted(p.name for p in dataset_root.glob('case1_*') if p.is_file())
+        if bundled:
+            out.append({'id':'case1','title':'Case 1','description':'Bundled evidence fixture','files':bundled,
+                        'ground_truth':'ground_truth.json' if (dataset_root/'ground_truth.json').exists() else None,
+                        'options':{},'scenario':None})
+        for truth_path in sorted(dataset_root.glob('*_ground_truth.json')):
+            try: truth=json.loads(truth_path.read_text(encoding='utf-8'))
+            except Exception: continue
+            prefix=truth_path.name.removesuffix('_ground_truth.json')
+            files=sorted(p.name for p in dataset_root.glob(prefix+'_*') if p.is_file() and not p.name.endswith('_ground_truth.json'))
+            out.append({'id':prefix,'title':prefix.replace('_',' ').title(),'description':'Bundled deterministic evidence dataset',
+                        'files':files,'ground_truth':truth_path.name,'options':truth.get('options',{}),'scenario':truth.get('scenario')})
+        return out
+
+    @app.get('/simulator/catalog')
+    def simulator_catalog(_:None=Depends(_auth)): return demo_cases()
     @app.post('/simulator/files')
     def simulator_files(_:None=Depends(_auth)):
         from datasets.generator import generate
         import tempfile
         with tempfile.TemporaryDirectory(prefix='traceweave-simulator-') as tmp:
             path=generate(tmp)
-            return {'files':[{'name':p.name,'content':p.read_text(encoding='utf-8')} for p in sorted(path.iterdir()) if p.name != 'ground_truth.json']}
+            aliases={'auth.jsonl':'case1_auth.jsonl','application.audit':'case1_application.audit','network.csv':'case1_network.csv'}
+            return {'files':[{'name':aliases.get(p.name,p.name),'content':p.read_text(encoding='utf-8')} for p in sorted(path.iterdir()) if p.name != 'ground_truth.json']}
 
     @app.post('/cases',status_code=201)
     async def create_case(files:list[UploadFile]=File(...),config:str|None=Form(default=None),_:None=Depends(_auth)):
+        app.state.telemetry['uploads'] += 1
         if not files: raise HTTPException(400,'at least one evidence file is required')
         try: configs=json.loads(config) if config else {}
         except Exception as e: raise HTTPException(400,f'invalid config JSON: {e}')
@@ -114,6 +156,27 @@ def create_app(data_dir=None):
         for c in result.claims:
             item=c.model_dump(mode='json'); item['claim_id']=c.stable_id; item['provenance']=sorted({r.id for r in result.records if c in r.claims or c.subject==r.id}); db.execute('INSERT OR REPLACE INTO claims VALUES(?,?,?)',(cid,item['claim_id'],json.dumps(item,sort_keys=True)))
         db.commit(); return {'id':cid,'status':'complete','file_count':len(entries),'record_count':len(all_records),'diagnostics':diagnostics,'files':load(cid)['files']}
+    @app.post('/demo-cases/{demo_id}/load', status_code=201)
+    async def load_demo_case(demo_id:str, _:None=Depends(_auth)):
+        """Load a catalog entry through the same ingestion function as POST /cases."""
+        from datasets.generator import generate
+        if demo_id in ('generated','simulator','attack'):
+            import tempfile
+            with tempfile.TemporaryDirectory(prefix='traceweave-demo-') as tmp:
+                generated=generate(tmp)
+                payload=[UploadFile(filename=n,file=io.BytesIO((generated/n).read_bytes())) for n in ('auth.jsonl','application.audit','network.csv')]
+                app.state.telemetry['demo_loads'] += 1
+                return await create_case(payload, None, None)
+        dataset_root=Path(__file__).resolve().parents[1]/'datasets'; truth=dataset_root/f'{demo_id}_ground_truth.json'
+        if demo_id == 'case1' and not truth.exists(): truth=dataset_root/'ground_truth.json'
+        if not truth.exists(): raise HTTPException(404,'demo case not found')
+        names=sorted(p.name for p in dataset_root.glob(f'{demo_id}_*') if p.is_file() and not p.name.endswith('ground_truth.json'))
+        payload=[UploadFile(filename=n.removeprefix(demo_id+'_'),file=io.BytesIO((dataset_root/n).read_bytes())) for n in names]
+        if not payload: raise HTTPException(422,'demo case has no evidence files')
+        app.state.telemetry['demo_loads'] += 1
+        return await create_case(payload, None, None)
+    @app.post('/simulator/cases', status_code=201)
+    async def load_simulator(_:None=Depends(_auth)): return await load_demo_case('generated', None)
     @app.get('/cases')
     def list_cases(_:None=Depends(_auth)): return [dict(r) for r in db.execute('SELECT id,title,description,status,progress FROM cases ORDER BY id')]
     @app.get('/cases/{cid}')
@@ -148,6 +211,20 @@ def create_app(data_dir=None):
                 broken_index=index; break
             previous=r['chain_hash']
         return {'case_id':cid,'verified':broken_index is None,'valid':broken_index is None,'first_broken_index':broken_index,'recomputed':True}
+    @app.get('/cases/{cid}/manifest')
+    def manifest(cid,_:None=Depends(_auth)):
+        c=load(cid)
+        return {'case_id':cid,'title':c['title'],'description':c['description'],'chain_head':c['chain_head'],
+                'chain_valid':c['chain_valid'],'files':c['files'],'record_count':len(c['records']),'claim_count':len(c['claims'])}
+    @app.get('/cases/{cid}/events/export')
+    def events_export(cid,format='jsonl',_=Depends(_auth)):
+        rows=load(cid)['records']
+        if format == 'jsonl':
+            body=''.join(json.dumps(r,sort_keys=True,ensure_ascii=False)+'\n' for r in rows)
+            return PlainTextResponse(body,media_type='application/x-ndjson',headers={'Content-Disposition':f'attachment; filename="{cid}-events.jsonl"'})
+        if format == 'json':
+            return Response(json.dumps(rows,sort_keys=True,ensure_ascii=False),media_type='application/json',headers={'Content-Disposition':f'attachment; filename="{cid}-events.json"'})
+        raise HTTPException(400,'format must be jsonl or json')
     @app.get('/cases/{cid}/progress')
     def progress(cid,_=Depends(_auth)):
         value=load(cid)['progress']
@@ -159,11 +236,12 @@ def create_app(data_dir=None):
         value=load(cid)['progress']; return StreamingResponse((f'data: {json.dumps(value,sort_keys=True)}\n\n' for _ in [0]),media_type='text/event-stream')
     @app.get('/cases/{cid}/report')
     def report(cid,format='json',_=Depends(_auth)):
+        app.state.telemetry['reports'] += 1
         c=load(cid)
-        if format=='html': return HTMLResponse(html_report(c))
+        if format=='html': return HTMLResponse(html_report(c),headers={'Content-Disposition':f'attachment; filename="{cid}-report.html"'})
         if format!='json': raise HTTPException(400,'format must be json or html')
-        return c
+        return Response(json.dumps(c,sort_keys=True,ensure_ascii=False),media_type='application/json',headers={'Content-Disposition':f'attachment; filename="{cid}-report.json"'})
     @app.delete('/cases/{cid}',status_code=204)
-    def delete(cid,_=Depends(_auth)): load(cid); db.execute('DELETE FROM cases WHERE id=?',(cid,)); db.commit()
+    def delete(cid,_=Depends(_auth)): load(cid); db.execute('DELETE FROM cases WHERE id=?',(cid,)); db.commit(); app.state.telemetry['deletes'] += 1
     return app
 app=create_app()

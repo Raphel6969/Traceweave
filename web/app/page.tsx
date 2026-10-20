@@ -1,139 +1,61 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { RefObject } from "react";
+import { gsap } from "gsap";
 
 type State = "Observed" | "Inferred" | "Unknown";
-type Claim = {
-  subject: string;
-  predicate: string;
-  object: string;
-  epistemic_state: State;
-  confidence?: { score: number; factors: unknown };
-  limitations?: string[];
-  rule?: string;
-  provenance?: string[];
-  claim_id?: string;
-};
-type Event = { id?: string; event_id?: string; event_type: string; occurred_at: string; summary?: string; state?: State; source?: string; [key: string]: unknown };
-type Summary = { id: string; title: string; description?: string; status?: string; progress?: { processed?: number; total?: number; status?: string } };
-type CaseData = Summary & { events: Event[]; claims: Claim[]; records: unknown[]; graph?: unknown; contradictions: unknown[]; gaps: unknown[]; limitations: string[]; chain_valid?: boolean; chain_head?: string };
+type Claim = { subject: string; predicate: string; object: unknown; epistemic_state: State; confidence?: { score: number; factors: unknown }; limitations?: string[]; rule?: string; provenance?: string[]; claim_id?: string };
+type EventRow = { id?: string; event_id?: string; record_id?: string; event_type: string; occurred_at: string; summary?: string; state?: State; source?: string; [key: string]: unknown };
+type Summary = { id: string; title: string; description?: string; status?: string; progress?: { processed?: number; total?: number } };
+type CaseData = Summary & { events: EventRow[]; claims: Claim[]; records: unknown[]; graph?: { nodes?: { id: string; label?: string }[]; links?: { source: string; target: string; relation?: string; provenance?: string[] }[] }; contradictions: unknown[]; gaps: unknown[]; limitations: string[]; chain_valid?: boolean; chain_head?: string; files?: unknown[] };
+type Demo = { id: string; title: string; description?: string };
+// Backend simulator contract: POST /simulator/files and POST /demo-cases/:id/load.
 
 const empty: CaseData = { id: "", title: "No case selected", events: [], claims: [], records: [], contradictions: [], gaps: [], limitations: [] };
-const arr = <T,>(value: unknown): T[] => (Array.isArray(value) ? value as T[] : []);
-const badge = (state: State) => <span className={`badge ${state.toLowerCase()}`}>{state}</span>;
+const list = <T,>(value: unknown): T[] => Array.isArray(value) ? value as T[] : [];
+const badge = (value: State) => <span className={`badge ${value.toLowerCase()}`}>{value}</span>;
 
-function request(url: string, key: string, init?: RequestInit) {
-  return fetch(url, { ...init, headers: { ...(init?.headers || {}), ...(key ? { "X-API-Key": key, Authorization: `Bearer ${key}` } : {}) } }).then(async response => {
-    if (!response.ok) throw Error(`${response.status} ${await response.text()}`);
-    return response.status === 204 ? null : response.json();
-  });
+async function request(url: string, key: string, init?: RequestInit) {
+  const response = await fetch(url, { ...init, headers: { ...(init?.headers || {}), ...(key ? { "X-API-Key": key, Authorization: `Bearer ${key}` } : {}) } });
+  if (!response.ok) throw Error(`${response.status} ${await response.text()}`);
+  return response.status === 204 ? null : response.json();
+}
+
+function Graph({ graph, onSelect }: { graph: CaseData["graph"]; onSelect: (id: string) => void }) {
+  const nodes = graph?.nodes || []; const links = graph?.links || [];
+  const positions = new Map(nodes.map((node, index) => [node.id, { x: 90 + (index % 5) * 160, y: 70 + Math.floor(index / 5) * 100 }]));
+  return <div className="graph-canvas" role="img" aria-label="Evidence relationship graph"><svg viewBox="0 0 850 520" preserveAspectRatio="xMidYMid meet"><g className="graph-links">{links.map((link, index) => { const from = positions.get(link.source), to = positions.get(link.target); return from && to ? <g key={`${link.source}-${link.target}-${index}`}><line x1={from.x} y1={from.y} x2={to.x} y2={to.y} /><text x={(from.x + to.x) / 2} y={(from.y + to.y) / 2 - 5}>{link.relation || "supports"}</text></g> : null; })}</g><g className="graph-nodes">{nodes.map(node => { const point = positions.get(node.id)!; return <g key={node.id} className="graph-node" tabIndex={0} role="button" onClick={() => onSelect(node.id)} onKeyDown={event => (event.key === "Enter" || event.key === " ") && onSelect(node.id)}><circle cx={point.x} cy={point.y} r="24" /><text x={point.x} y={point.y + 4}>{(node.label || node.id).slice(0, 12)}</text></g>; })}</g></svg>{!nodes.length && <p className="empty-inline">No relationship data was returned for this case.</p>}</div>;
+}
+
+function Inspector({ claim, onProvenance }: { claim: Claim | null; onProvenance: (claim: Claim) => void }) {
+  return <aside className="card inspector"><span className="kicker">EVIDENCE INSPECTOR</span><h2>Claim detail</h2>{claim ? <><div className="claim-hero">{badge(claim.epistemic_state)}<p>{claim.subject} <em>{claim.predicate}</em> {String(claim.object)}</p></div><dl><dt>Confidence</dt><dd>{claim.confidence ? claim.confidence.score : "Not reported"}</dd><dt>Rule</dt><dd>{claim.rule || "Direct source observation"}</dd></dl><button className="quiet" onClick={() => onProvenance(claim)}>Open supporting raw records</button>{claim.provenance?.map(id => <code key={id}>{id}</code>)}{claim.limitations?.map(item => <p className="notice limitation" key={item}>{item}</p>)}</> : <p className="muted">Select a claim to inspect its evidence trail.</p>}</aside>;
 }
 
 export default function Home() {
   const api = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
-  const [key, setKey] = useState("");
-  const [cases, setCases] = useState<Summary[]>([]);
-  const [selected, setSelected] = useState("");
-  const [current, setCurrent] = useState(empty);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [filter, setFilter] = useState("");
-  const [tab, setTab] = useState("timeline");
-  const [active, setActive] = useState<Claim | null>(null);
-  const [files, setFiles] = useState<File[]>([]);
-  const [maps, setMaps] = useState<Record<string, string>>({});
-  const [uploading, setUploading] = useState(false);
-  const [progress, setProgress] = useState("");
-
+  const [key, setKey] = useState(""); const [cases, setCases] = useState<Summary[]>([]); const [demos, setDemos] = useState<Demo[]>([]); const [selected, setSelected] = useState(""); const [current, setCurrent] = useState(empty); const [view, setView] = useState("timeline"); const [loading, setLoading] = useState(true); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [query, setQuery] = useState(""); const [active, setActive] = useState<Claim | null>(null); const [files, setFiles] = useState<File[]>([]); const [uploading, setUploading] = useState(false); const [telemetry, setTelemetry] = useState<Record<string, unknown> | null>(null); const [zoom, setZoom] = useState(1); const input = useRef<HTMLInputElement>(null);
   useEffect(() => setKey(localStorage.getItem("traceweave-api-key") || ""), []);
-
-  const loadCases = useCallback(async () => {
-    if (!api) { setLoading(false); setError("API URL is not configured. Set NEXT_PUBLIC_API_URL to connect."); return; }
-    setLoading(true); setError("");
-    try {
-      const payload = await request(`${api}/cases`, key);
-      const list = arr<Summary>(payload?.cases ?? payload);
-      setCases(list);
-      setSelected(value => value && list.some(item => item.id === value) ? value : list[0]?.id || "");
-    } catch (reason) { setError(`Unable to load cases: ${(reason as Error).message}`); }
-    finally { setLoading(false); }
-  }, [api, key]);
-
+  useEffect(() => { if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) gsap.fromTo(".workspace > *", { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: .35, stagger: .03, ease: "power2.out" }); }, []);
+  const loadCases = useCallback(async () => { if (!api) { setLoading(false); setError("Set NEXT_PUBLIC_API_URL to connect to the TraceWeave API."); return; } setLoading(true); setError(""); try { const [casePayload, demoPayload] = await Promise.all([request(`${api}/cases`, key), request(`${api}/demo-cases`, key)]); const nextCases = list<Summary>(casePayload?.cases ?? casePayload); setCases(nextCases); setDemos(list<Demo>(demoPayload)); setSelected(value => value && nextCases.some(item => item.id === value) ? value : nextCases[0]?.id || ""); } catch (reason) { setError(`Unable to load workspace: ${(reason as Error).message}`); } finally { setLoading(false); } }, [api, key]);
   useEffect(() => { loadCases(); }, [loadCases]);
-
-  const loadCase = useCallback(async (id: string) => {
-    if (!id || !api) return;
-    setLoading(true); setError("");
-    try {
-      const [detail, timeline, claims, gaps, contradictions, integrity] = await Promise.all([
-        request(`${api}/cases/${id}`, key), request(`${api}/cases/${id}/timeline`, key), request(`${api}/cases/${id}/claims`, key),
-        request(`${api}/cases/${id}/gaps`, key), request(`${api}/cases/${id}/contradictions`, key), request(`${api}/cases/${id}/integrity`, key),
-      ]);
-      const loaded = { ...detail, events: arr<Event>(timeline), claims: arr<Claim>(claims), records: arr(detail.records), gaps: arr(gaps), contradictions: arr(contradictions), limitations: arr(detail.limitations), chain_valid: integrity.verified } as CaseData;
-      setCurrent(loaded); setActive(loaded.claims[0] || null);
-    } catch (reason) { setCurrent(empty); setError(`Unable to hydrate case: ${(reason as Error).message}`); }
-    finally { setLoading(false); }
-  }, [api, key]);
-
+  const loadCase = useCallback(async (id: string) => { if (!id || !api) return; setLoading(true); setError(""); try { const [detail, timeline, claims, gaps, contradictions, integrity] = await Promise.all([request(`${api}/cases/${id}`, key), request(`${api}/cases/${id}/timeline`, key), request(`${api}/cases/${id}/claims`, key), request(`${api}/cases/${id}/gaps`, key), request(`${api}/cases/${id}/contradictions`, key), request(`${api}/cases/${id}/integrity`, key)]); const loaded = { ...detail, events: list<EventRow>(timeline?.events ?? timeline), claims: list<Claim>(claims?.claims ?? claims), records: list(detail.records), gaps: list(gaps?.gaps ?? gaps), contradictions: list(contradictions?.contradictions ?? contradictions), limitations: list<string>(detail.limitations), chain_valid: integrity?.verified } as CaseData; setCurrent(loaded); setActive(loaded.claims[0] || null); } catch (reason) { setCurrent(empty); setError(`Unable to hydrate case: ${(reason as Error).message}`); } finally { setLoading(false); } }, [api, key]);
   useEffect(() => { loadCase(selected); }, [selected, loadCase]);
-
-  useEffect(() => {
-    if (!selected || !api || typeof EventSource === "undefined") return;
-    const query = key ? `?api_key=${encodeURIComponent(key)}` : "";
-    const source = new EventSource(`${api}/cases/${selected}/progress${query}`);
-    source.onmessage = event => { try { const value = JSON.parse(event.data); setProgress(`Processing: ${value.processed ?? 0}/${value.total ?? "?"} (${value.status ?? "running"})`); } catch { setProgress(event.data); } };
-    source.onerror = () => source.close();
-    return () => source.close();
-  }, [api, selected, key]);
-
+  const visible = useMemo(() => current.events.filter(item => `${item.event_type} ${item.summary || ""} ${item.source || ""}`.toLowerCase().includes(query.toLowerCase())), [current.events, query]);
+  const review = current.claims.filter(item => item.epistemic_state !== "Observed").length + current.gaps.length + current.contradictions.length;
+  const upload = async (incoming: File[]) => { if (!api || !incoming.length) return; setUploading(true); setError(""); const body = new FormData(); incoming.forEach(file => body.append("files", file)); body.append("config", "{}"); try { const result = await request(`${api}/cases`, key, { method: "POST", body }); setNotice(`Indexed ${result.record_count ?? 0} records from ${result.file_count ?? incoming.length} files.`); setFiles([]); await loadCases(); setSelected(result.id); setView("timeline"); } catch (reason) { setError(`Upload failed: ${(reason as Error).message}`); } finally { setUploading(false); } };
+  const loadDemo = async (demoId = "generated") => { try { const result = await request(`${api}/demo-cases/${demoId}/load`, key, { method: "POST" }); setNotice("Demo evidence loaded through the normal case ingestion path."); await loadCases(); setSelected(result.id); } catch (reason) { setError(`Demo case unavailable: ${(reason as Error).message}`); } };
+  const showTelemetry = async () => { try { setTelemetry(await request(`${api}/telemetry`, key)); } catch (reason) { setError(`Telemetry unavailable: ${(reason as Error).message}`); } };
+  const remove = async () => { if (!selected || !confirm("Delete this case and its evidence?")) return; try { await request(`${api}/cases/${selected}`, key, { method: "DELETE" }); setSelected(""); setCurrent(empty); setNotice("Case deleted."); await loadCases(); } catch (reason) { setError(`Delete failed: ${(reason as Error).message}`); } };
+  const openProvenance = async (claim: Claim) => { if (!claim.claim_id) return; try { const data = await request(`${api}/claims/${claim.claim_id}/provenance`, key); setNotice(`${list(data?.provenance).length} supporting raw record(s) returned.`); } catch (reason) { setError(`Provenance unavailable: ${(reason as Error).message}`); } };
   const saveKey = (value: string) => { setKey(value); localStorage.setItem("traceweave-api-key", value); };
-  const visible = useMemo(() => current.events.filter(event => `${event.event_type} ${event.summary || ""} ${event.source || ""}`.toLowerCase().includes(filter.toLowerCase())), [current.events, filter]);
+  const graph = current.graph || {};
+  return <main className="app-shell"><aside className="rail"><div className="brand"><b>T</b><span>TRACE<span>WEAVE</span></span></div><p className="rail-label">INVESTIGATION</p><button className="rail-case" onClick={() => setView("timeline")}><i />{current.title || "No case selected"}<small>{current.id ? "ACTIVE CASE" : "WAITING FOR EVIDENCE"}</small></button><nav>{[["timeline", "◷ Chronology"], ["claims", "◇ Claims"], ["graph", "⌘ Relationship map"], ["findings", "! Findings"]].map(([id, label]) => <button className={view === id ? "selected" : ""} key={id} onClick={() => setView(id)}>{label}{id === "claims" && <b>{current.claims.length}</b>}{id === "findings" && <b className="warn">{review}</b>}</button>)}</nav><div className="rail-bottom"><button onClick={showTelemetry}>⌁ Developer telemetry</button><label>API KEY<input aria-label="API key" type="password" placeholder="optional" value={key} onChange={event => saveKey(event.target.value)} /></label></div></aside><section className="workspace"><header className="topbar"><div><p className="kicker">EVIDENCE / {current.id || "UNASSIGNED"}</p><h1>{current.title || "Evidence workbench"}</h1></div><div className="top-actions"><span className="connection"><i />{api ? "API configured" : "Offline"}</span><button className="quiet" onClick={showTelemetry}>Telemetry</button><button className="primary" onClick={() => setView("upload")}>＋ Add evidence</button></div></header><div className="casebar"><label>CASE FILE<select aria-label="Select case" value={selected} onChange={event => setSelected(event.target.value)}><option value="">Choose a case…</option>{cases.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><select aria-label="Demo case" onChange={event => event.target.value && loadDemo(event.target.value)} defaultValue=""><option value="">Load demo case…</option>{demos.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select><button className="quiet" onClick={loadCases}>↻ Refresh</button>{selected && <button className="quiet danger-text" onClick={remove}>Delete</button>}</div>{loading && <div className="state loading" role="status"><span className="spinner" />Synchronizing evidence…</div>}{error && <div className="state error" role="alert">{error}<button onClick={loadCases}>Retry</button></div>}{notice && <div className="state success" role="status">{notice}</div>}
+  {!loading && !selected && !error && <section className="card empty-state"><h2>No case selected</h2><p>Upload real evidence or load a generated demo case. TraceWeave will not display fabricated results.</p><button className="primary" onClick={() => setView("upload")}>Start an investigation</button></section>}
+  {selected && <><section className="case-header"><div><p className="kicker">CASE IDENTITY</p><h2>{current.title}</h2><p>{current.description}</p></div><div className="review"><strong>{review}</strong><span>review-needed items</span></div></section><div className="integrity-strip"><span>Chain <b>{current.chain_valid ? "verified" : "not verified"}</b></span><span>Records <b>{current.records.length}</b></span><span>Claims <b>{current.claims.length}</b></span><span>Sources <b>{current.files?.length || 0}</b></span><code>{current.chain_head?.slice(0, 12) || "—"}…</code></div>{view === "timeline" && <section className="main-grid"><section className="card"><div className="panel-head"><h2>Chronology</h2><span className="muted">{visible.length} of {current.events.length}</span></div><input className="search" aria-label="Filter events" placeholder="Search type, source, or summary" value={query} onChange={event => setQuery(event.target.value)} />{visible.length ? <ol className="timeline">{visible.map((event, index) => <li key={event.id || event.event_id || index}><time>{event.occurred_at}</time><h3>{event.event_type}</h3><p>{event.summary || "No summary supplied."}</p><span className="muted">{event.source || "Source not recorded"}</span></li>)}</ol> : <p className="empty-inline">No events match this filter.</p>}</section><Inspector claim={active} onProvenance={openProvenance} /></section>}{view === "claims" && <section className="main-grid"><section className="card"><span className="kicker">CLAIM REGISTER</span><h2>{current.claims.length} claims</h2>{current.claims.map((claim, index) => <button className="claim" key={claim.claim_id || index} onClick={() => setActive(claim)}>{claim.subject} <b>{claim.predicate}</b> {String(claim.object)} {badge(claim.epistemic_state)}</button>)}</section><Inspector claim={active} onProvenance={openProvenance} /></section>}{view === "graph" && <section className="card"><div className="panel-head"><div><span className="kicker">RELATIONSHIP MAP</span><h2>Evidence graph</h2></div><div><button className="quiet" onClick={() => setZoom(value => Math.min(1.8, value + .1))}>＋</button><button className="quiet" onClick={() => setZoom(value => Math.max(.6, value - .1))}>−</button><button className="quiet" onClick={() => setZoom(1)}>Reset</button></div></div><div style={{ transform: `scale(${zoom})`, transformOrigin: "top left" }}><Graph graph={graph} onSelect={id => setNotice(`Selected graph node ${id.slice(0, 16)}…`)} /></div></section>}{view === "findings" && <section className="split"><div className="card"><span className="kicker">REVIEW QUEUE</span><h2>Contradictions</h2>{current.contradictions.length ? current.contradictions.map((item, index) => <div className="finding contradiction" key={index}>{JSON.stringify(item)}</div>) : <p className="empty-inline">No contradictions reported.</p>}<h2 className="section-gap">Evidence gaps</h2>{current.gaps.length ? current.gaps.map((item, index) => <div className="finding gap" key={index}>{JSON.stringify(item)}</div>) : <p className="empty-inline">No evidence gaps reported.</p>}</div><div className="card"><span className="kicker">LIMITATIONS</span><h2>Interpretation boundaries</h2>{current.limitations.length ? current.limitations.map(item => <p className="finding limitation" key={item}>{item}</p>) : <p className="empty-inline">No limitations reported.</p>}</div></section>}{view === "upload" && <Upload files={files} setFiles={setFiles} input={input} uploading={uploading} onUpload={upload} />}</>}
+  <footer>TraceWeave · evidence before conclusions · <button className="link-button" onClick={() => window.open(`${api}/cases/${selected}/report?format=html${key ? `&api_key=${encodeURIComponent(key)}` : ""}`, "_blank")}>Open report</button></footer></section>{telemetry && <div className="modal-backdrop" onClick={() => setTelemetry(null)}><section className="card telemetry" onClick={() => undefined}><button className="close" onClick={() => setTelemetry(null)}>×</button><span className="kicker">DEVELOPER TELEMETRY</span><h2>Runtime diagnostics</h2><pre>{String(JSON.stringify(telemetry, null, 2))}</pre></section></div>}</main>;
+}
 
-  const upload = async (selectedFiles: File[]) => {
-    if (!api || !selectedFiles.length) return;
-    setUploading(true); setError("");
-    const body = new FormData(); selectedFiles.forEach(file => body.append("files", file));
-    const configs: Record<string, unknown> = {};
-    try {
-      selectedFiles.forEach(file => {
-        let mapping: unknown = {};
-        try { mapping = maps[file.name + "field mapping"] ? JSON.parse(maps[file.name + "field mapping"]) : {}; } catch { throw Error(`Invalid JSON field mapping for ${file.name}`); }
-        configs[file.name] = { timezone: maps[file.name + "timezone"] || "UTC", known_clock_offset_seconds: Number(maps[file.name + "clock offset"] || 0), field_mappings: mapping };
-      });
-    } catch (reason) { setError((reason as Error).message); setUploading(false); return; }
-    body.append("config", JSON.stringify(configs));
-    try { const result = await request(`${api}/cases`, key, { method: "POST", body }); setProgress(`Uploaded ${result.file_count ?? selectedFiles.length} file(s); ${result.record_count ?? ""} records indexed.`); await loadCases(); setSelected(result.id); setTab("timeline"); }
-    catch (reason) { setError(`Upload failed: ${(reason as Error).message}`); }
-    finally { setUploading(false); }
-  };
-
-  const loadSimulator = async () => {
-    if (!api) { setError("API URL is not configured. The simulator requires the backend."); return; }
-    try { const result = await request(`${api}/simulator/files`, key, { method: "POST" }); await upload(arr<{ name: string; content: string }>(result.files).map(file => new File([file.content], file.name))); }
-    catch (reason) { setError(`Simulator failed: ${(reason as Error).message}`); }
-  };
-
-  const deleteCase = async () => {
-    if (!selected || !confirm("Delete this case and its evidence?")) return;
-    try { await request(`${api}/cases/${selected}`, key, { method: "DELETE" }); setSelected(""); await loadCases(); }
-    catch (reason) { setError(`Case deletion failed: ${(reason as Error).message}`); }
-  };
-
-  const reviewCount = current.claims.filter(claim => claim.epistemic_state !== "Observed").length + current.gaps.length + current.contradictions.length;
-  return <main className="shell">
-    <header className="topbar"><div><p className="eyebrow">TRACEWEAVE / INVESTIGATIONS</p><h1>Evidence workbench</h1></div><span className="connection"><i /> {api ? "API configured" : "API configuration required"}</span></header>
-    <section className="toolbar"><label htmlFor="case">Case</label><select id="case" value={selected} onChange={event => setSelected(event.target.value)}><option value="">Select a case</option>{cases.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select><button onClick={() => setTab("upload")}>Upload evidence</button><button onClick={loadSimulator}>Load simulated attack</button>{selected && <button className="danger" onClick={deleteCase}>Delete case</button>}<button onClick={loadCases}>Retry</button><input aria-label="API key" type="password" placeholder="API key (optional)" value={key} onChange={event => saveKey(event.target.value)} /></section>
-    {loading && <p className="loading" role="status">Loading case evidence…</p>}{error && <div className="error" role="alert">{error} <button onClick={loadCases}>Retry</button></div>}{progress && <p className="success" role="status">{progress}</p>}
-    {!loading && !selected && !error && <section className="empty-state"><h2>No cases loaded</h2><p>Upload evidence or load a simulated attack to begin.</p></section>}
-    {selected && <><section className="case-header"><div><p className="eyebrow">CASE IDENTITY</p><h2>{current.title}</h2><p>{current.description}</p></div><div className="review"><strong>{reviewCount}</strong><span>review-needed items</span></div></section>
-      <nav className="tabs" aria-label="Case views">{["timeline", "claims", "findings", "graph", "integrity", "upload"].map(view => <button className={tab === view ? "active" : ""} key={view} onClick={() => setTab(view)}>{view}</button>)}</nav>
-      {tab === "upload" && <section className="panel upload"><h2>Upload evidence</h2><p>Attach one or more logs with optional per-source metadata.</p><input type="file" multiple onChange={event => setFiles(Array.from(event.target.files || []))} />{files.map(file => <div className="file-row" key={file.name}><strong>{file.name}</strong>{["timezone", "clock offset", "field mapping"].map(label => <label key={label}>{label}<input placeholder={label} value={maps[file.name + label] || ""} onChange={event => setMaps({ ...maps, [file.name + label]: event.target.value })} /></label>)}</div>)}<button disabled={uploading || !files.length} onClick={() => upload(files)}>{uploading ? "Uploading…" : "Upload files"}</button></section>}
-      {tab === "timeline" && <section className="panel"><div className="panel-head"><h2>Timeline</h2><span className="muted">{visible.length} of {current.events.length} · UTC</span></div><input className="search" aria-label="Filter events" placeholder="Filter events" value={filter} onChange={event => setFilter(event.target.value)} />{visible.length ? <ol className="timeline">{visible.map((event, index) => <li key={event.id || event.event_id || index}><time>{event.occurred_at}</time><h3>{event.event_type}</h3><p>{event.summary || "No event summary supplied."}</p><span className="muted">{event.source || "Source not recorded"}</span></li>)}</ol> : <p className="empty">No timeline events match this filter.</p>}</section>}
-      {tab === "claims" && <section className="panel"><h2>Claims ({current.claims.length})</h2><div className="claim-list">{current.claims.map((claim, index) => <button className="claim" key={claim.claim_id || index} onClick={() => setActive(claim)}>{claim.subject} <b>{claim.predicate}</b> {String(claim.object)} {badge(claim.epistemic_state)}</button>)}</div>{active && <div className="provenance"><h3>Provenance</h3>{(active.provenance || []).map(value => <code key={value}>{value}</code>)}{active.rule && <p>Rule: {active.rule}</p>}{active.confidence && <p>Confidence: {active.confidence.score}; factors are decomposed in the report.</p>}{(active.limitations || []).map(value => <p key={value}>Limitation: {value}</p>)}</div>}</section>}
-      {tab === "findings" && <section className="panel"><h2>Gaps & contradictions</h2><h3>Contradictions ({current.contradictions.length})</h3>{current.contradictions.map((value, index) => <p className="notice contradiction" key={index}>{JSON.stringify(value)}</p>)}<h3>Evidence gaps ({current.gaps.length})</h3>{current.gaps.map((value, index) => <p className="notice gap" key={index}>{JSON.stringify(value)}</p>)}<h3>Limitations ({current.limitations.length})</h3>{current.limitations.map(value => <p className="notice limitation" key={value}>{value}</p>)}</section>}
-      {tab === "graph" && <section className="panel"><h2>Graph</h2><pre className="raw">{JSON.stringify(current.graph ?? null, null, 2)}</pre></section>}
-      {tab === "integrity" && <section className="panel"><h2>Integrity & reports</h2><p>Chain: <strong>{current.chain_valid === true ? "verified" : current.chain_valid === false ? "failed" : "not reported"}</strong></p><p>Records: {current.records.length} · Claims: {current.claims.length}</p><code>{current.chain_head || "No chain head reported"}</code><div className="reports"><a href={`${api}/cases/${selected}/report?format=json${key ? `&api_key=${encodeURIComponent(key)}` : ""}`}>Evidence JSON ↗</a><a href={`${api}/cases/${selected}/report?format=html${key ? `&api_key=${encodeURIComponent(key)}` : ""}`}>HTML report ↗</a></div></section>}
-    </>}
-    <footer>TraceWeave · local-first, evidence before conclusions</footer>
-  </main>;
+function Upload({ files, setFiles, input, uploading, onUpload }: { files: File[]; setFiles: (files: File[]) => void; input: RefObject<HTMLInputElement>; uploading: boolean; onUpload: (files: File[]) => void }) {
+  return <section className="card upload-card"><span className="kicker">EVIDENCE INTAKE</span><h2>Import source files</h2><p className="muted">Upload multiple auth, audit, CSV, or Zeek-style files in one case.</p><button className="dropzone" onClick={() => input.current?.click()} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); setFiles(Array.from(event.dataTransfer.files)); }}><strong>{files.length ? `${files.length} file(s) staged` : "Drop evidence files here"}</strong><small>or browse from your device · bulk upload supported</small></button><input ref={input} hidden type="file" multiple onChange={event => setFiles(Array.from(event.target.files || []))} />{files.map(file => <div className="staged" key={file.name}><strong>{file.name}</strong><small>{Math.max(1, Math.round(file.size / 1024))} KB</small></div>)}<button className="primary upload-button" disabled={!files.length || uploading} onClick={() => onUpload(files)}>{uploading ? "Indexing evidence…" : "Index evidence"}</button></section>;
 }

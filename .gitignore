@@ -4,11 +4,14 @@ __pycache__/
 *$py.class
 .pytest_cache/
 .traceweave-data/
+*.sqlite3
+*.db
 .next/
 web/.next/
 .mypy_cache/
 .ruff_cache/
 .coverage
+coverage.xml
 htmlcov/
 
 # Virtual environments and packaged artifacts
@@ -26,6 +29,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 *.tsbuildinfo
+.DS_Store
 
 # Docker/local environment files
 .env
