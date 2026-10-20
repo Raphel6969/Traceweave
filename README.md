@@ -70,7 +70,7 @@ Start the web application in another terminal:
 
 ```sh
 cd web
-npm install
+npm ci
 NEXT_PUBLIC_API_URL=http://127.0.0.1:8000 npm run dev
 ```
 
@@ -97,16 +97,23 @@ Linux/macOS:
 ```
 
 These scripts create `.venv`, install the pinned `requirements.txt`, install
-the frontend with `npm install`, and start Uvicorn plus Next.js together. The
+the frontend with `npm ci`, and start Uvicorn plus Next.js together. The
 SQLite database is created at `.traceweave-data/traceweave.sqlite3`. Copy
 `.env.example` to `.env` and set `TRACEWEAVE_API_KEY` when API-key protection
 is required.
 
-For a containerized run:
+For a containerized run, copy `.env.example` to `.env` first if you need custom origins or API-key protection:
 
 ```sh
+cp .env.example .env
+docker compose config
 docker compose up --build
 ```
+
+The API image installs the pinned `requirements.txt`, the web image uses the committed
+`web/package-lock.json`, and Compose waits for the API health check before starting
+the web service. `NEXT_PUBLIC_API_URL` is a build-time setting, so rebuild the web
+image after changing it.
 
 The API is at `http://localhost:8000` and the UI is at
 `http://localhost:3000`. Docker is required for this option.
