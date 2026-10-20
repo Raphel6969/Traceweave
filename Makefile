@@ -1,4 +1,4 @@
-.PHONY: install test lint docker-config
+.PHONY: install test lint docker-config docker-smoke
 
 install:
 	python -m pip install -r requirements.txt
@@ -11,3 +11,7 @@ lint:
 
 docker-config:
 	docker compose config
+
+
+docker-smoke:
+	./scripts/docker-smoke.sh
