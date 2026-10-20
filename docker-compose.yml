@@ -1,0 +1,23 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TRACEWEAVE_DATA_DIR=/app/.traceweave-data
+    volumes:
+      - traceweave-data:/app/.traceweave-data
+    ports: ["8000:8000"]
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on: [api]
+    ports: ["3000:3000"]
+
+volumes:
+  traceweave-data:

@@ -1,0 +1,40 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.traceweave-data/
+.next/
+web/.next/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and packaged artifacts
+.venv/
+venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Node dependencies and local output
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.tsbuildinfo
+
+# Docker/local environment files
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+
+# Preserve .opencode configuration and workflow files; ignore only generated
+# dependencies and local runtime output under that tooling directory.
+.opencode/node_modules/
+.opencode/.cache/
+.opencode/tmp/

@@ -1,0 +1,8 @@
+.git
+.opencode
+.traceweave-data
+web/node_modules
+web/.next
+__pycache__
+*.pyc
+.pytest_cache

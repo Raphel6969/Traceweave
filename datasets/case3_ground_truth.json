@@ -1,0 +1,6 @@
+{
+  "case": "case3",
+  "description": "contradiction",
+  "expected_contradictions": true,
+  "expected_gaps": false
+}
