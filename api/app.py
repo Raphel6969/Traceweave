@@ -65,7 +65,10 @@ def create_app(data_dir=None):
             item.update(meta); files.append(item)
         analysis=json.loads(row['analysis']) if row['analysis'] else {}
         payload={'id':cid,'title':row['title'],'description':row['description'],'status':row['status'],'progress':json.loads(row['progress']),'files':files,'records':records,'claims':claims,'chain_head':records[-1]['chain_hash'] if records else '0'*64}
-        payload['timeline']=[dict(r['event'],event_id=r['id'],record_id=r['id'],state='Observed',provenance=[r['id']]) for r in records]
+        payload['timeline']=[dict(r['event'],event_id=r['id'],record_id=r['id'],state='Observed',
+                                  source=r['file'] or r['source_id'],source_id=r['source_id'],line=r['line'],
+                                  raw_line=r['raw_line'],raw_sha256=r['raw_sha256'],chain_hash=r['chain_hash'],
+                                  provenance=[r['id']]) for r in records]
         payload['graph']={'nodes':sorted({r['id'] for r in records}|{str(c['object']) for c in claims}),'links':[{'source':r['id'],'target':str(c['object']),'relation':c['predicate'],'evidence_id':r['id'],'provenance':[r['id']]} for r in records for c in r.get('claims',[])]}
         payload['gaps']=analysis.get('gaps',[]); payload['contradictions']=analysis.get('contradictions',[]); payload['limitations']=analysis.get('limitations',[]); payload['confidence_breakdown']=analysis.get('confidence_breakdown',{}); payload['chain_valid']=_verify(cid)
         return payload
@@ -111,6 +114,8 @@ def create_app(data_dir=None):
             except Exception: continue
             prefix=truth_path.name.removesuffix('_ground_truth.json')
             files=sorted(p.name for p in dataset_root.glob(prefix+'_*') if p.is_file() and not p.name.endswith('_ground_truth.json'))
+            if not files:
+                continue
             out.append({'id':prefix,'title':prefix.replace('_',' ').title(),'description':'Bundled deterministic evidence dataset',
                         'files':files,'ground_truth':truth_path.name,'options':truth.get('options',{}),'scenario':truth.get('scenario')})
         return out

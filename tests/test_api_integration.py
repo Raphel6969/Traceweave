@@ -116,6 +116,26 @@ def test_simulator_demo_selection_and_bulk_upload(tmp_path: Path) -> None:
     assert client.get(f"/cases/{case_id}").json()["status"] == "complete"
 
 
+def test_demo_catalog_only_contains_loadable_fixtures_and_timeline_has_provenance(tmp_path: Path) -> None:
+    client = TestClient(create_app(tmp_path))
+    demos = client.get("/demo-cases").json()
+    assert demos
+    assert all(item["files"] for item in demos)
+    for demo in demos:
+        loaded = client.post(f"/demo-cases/{demo['id']}/load")
+        assert loaded.status_code == 201, (demo, loaded.text)
+        timeline = client.get(f"/cases/{loaded.json()['id']}/timeline").json()
+        assert timeline
+        assert all(item.get("source") and item.get("raw_line") is not None for item in timeline)
+
+
+def test_graph_contract_accepts_string_nodes(tmp_path: Path) -> None:
+    client = TestClient(create_app(tmp_path))
+    case_id, _ = upload_case(client)
+    graph = client.get(f"/cases/{case_id}/graph").json()
+    assert all(isinstance(node, str) for node in graph["nodes"])
+
+
 def test_api_key_auth_covers_protected_routes(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("TRACEWEAVE_API_KEY", "secret-test-key")
     client = TestClient(create_app(tmp_path))
@@ -148,3 +168,7 @@ def test_frontend_has_no_fabricated_case_payload(tmp_path: Path) -> None:
     assert "No case selected" in source
     assert "TraceWeave case" not in source
     assert "/demo-cases/" in source
+    assert 'view === "findings"' in source
+    assert 'view === "upload"' in source
+    assert "Paste raw evidence" in source
+    assert "occurred_at" in source
